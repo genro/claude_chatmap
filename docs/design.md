@@ -9,7 +9,7 @@ The primary topic is often recognisable only afterwards.
 
 ## Milestones
 - M1, collect and classify: physical turns recorded live, the Haiku classifier, the Sonnet reorganiser, the state in `$.state`, a local server with the map page.
-- M2, visualise further: persistence across sessions, import of the turns a chat had before the mod loaded.
+- M2, visualise further: done so far, persistence across app restarts and import of the turns a chat had before the mod loaded.
 - M3, use: decided after M2. Drop, move, the replacement message, engine compaction.
 
 ## Files
@@ -65,6 +65,7 @@ The primary topic is often recognisable only afterwards.
 
 ## State
 - `$.state` (`chatmap`): topics, topic counter, primary topic, physical turns, logical turns, pass counter.
+- Every publish also writes the map to `out/state/<session>.json` under the plugin root. At load the mod restores it; only a chat with no saved map imports its past turns from the transcript.
 - Turns are numbered by position, the next number after the last recorded; numbers of dropped turns are not reused.
 - `$.session.messages()` returns no uuid; `handle` exists only inside a `session.compact` hook.
 

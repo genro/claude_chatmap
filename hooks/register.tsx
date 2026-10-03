@@ -25,6 +25,15 @@ const PERSON = ['composer', 'bridge', 'sdk']
 const PORT_BASE = 41000
 const PORT_RANGE = 8000
 
+type Saved = {
+  topics: Record<string, Topic>
+  topicCount: number
+  primary: string
+  physical: Physical[]
+  logical: Logical[]
+  passes: number
+}
+
 type ClassifierReply = { assign: string[]; newSubject?: boolean }
 type ReorganiserReply = {
   logical: { physical: number[]; label: string; prompt: string; outcome: string; topics: string[]; block: string }[]
@@ -188,7 +197,38 @@ async function snapshot($: EngineInterface): Promise<unknown> {
   }
 }
 
+async function savedPath($: EngineInterface): Promise<string> {
+  return `${$.plugin.root}/out/state/${await $.session.id()}.json`
+}
+
+async function save($: EngineInterface): Promise<void> {
+  const saved: Saved = {
+    topics: await read($, topics),
+    topicCount: await read($, topicCount),
+    primary: await read($, primary),
+    physical: await read($, physical),
+    logical: await read($, logical),
+    passes: await read($, passes),
+  }
+  await $.fs.write(await savedPath($), JSON.stringify(saved))
+}
+
+async function restore($: EngineInterface): Promise<boolean> {
+  if ((await read($, physical)).length) return true
+  const path = await savedPath($)
+  if (!(await $.fs.exists(path))) return false
+  const saved = JSON.parse(await $.fs.read(path)) as Saved
+  await update($, topics, () => saved.topics)
+  await update($, topicCount, () => saved.topicCount)
+  await update($, primary, () => saved.primary)
+  await update($, physical, () => saved.physical.map(p => (p.state === 'running' ? { ...p, state: 'queued' } : p)))
+  await update($, logical, () => saved.logical)
+  await update($, passes, () => saved.passes)
+  return true
+}
+
 async function publish($: EngineInterface, lane: Lane): Promise<void> {
+  await save($)
   if (!lane.url) return
   await $.http.fetch(`${lane.url}/state`, {
     method: 'POST',
@@ -316,8 +356,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'chatmap', description: 'Reorganise this conversation (full: rebuild from scratch) and show the URL of its map', argumentHint: '[full]' })
+    if (!(await restore($))) lane.backlog = (await importHistory($)) > 0
     await dropNotifications($)
-    lane.backlog = (await importHistory($)) > 0
     void serve($, lane)
     $.clock.every(TICK_MS, () => {
       void work($, 'none', lane)
