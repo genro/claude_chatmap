@@ -256,24 +256,25 @@ function portOf(session: string): number {
   return PORT_BASE + (hash % PORT_RANGE)
 }
 
+type Imported = { n: number; prompt: string; answer: string; tools: string[] }
+
 async function importHistory($: EngineInterface): Promise<number> {
   if ((await read($, physical)).length) return 0
-  const turns: Physical[] = []
-  for (const message of await $.session.messages()) {
-    const text = message.text.trim()
-    if (message.role === 'user' && !message.toolResults?.length && text && !text.startsWith('<')) {
-      turns.push({ n: turns.length + 1, prompt: text.slice(0, PROMPT_TEXT), answer: '', tools: [], short: false, haiku: [], state: 'unclassified' })
-      continue
-    }
-    const turn = turns[turns.length - 1]
-    if (!turn || message.role !== 'assistant') continue
-    if (text) turn.answer = edges(text)
-    turn.tools.push(...message.toolUses.map(use => use.tool))
+  const run = await $.process.run(
+    ['python3', `${$.plugin.root}/tools/classify_offline.py`, '--dump-turns', await $.session.id()],
+    { timeoutMs: 120000 },
+  )
+  if (run.exitCode !== 0) {
+    $.ui.toast(`chatmap could not import past turns: ${run.stderr.trim().split('\n').pop()}`)
+    return 0
   }
-  for (const turn of turns) {
-    turn.tools = [...new Set(turn.tools)]
-    turn.short = turn.n > 1 && turn.tools.length === 0 && turn.prompt.length < SHORT_CHARS
-  }
+  const imported = JSON.parse(run.stdout) as Imported[]
+  const turns: Physical[] = imported.map(t => ({
+    ...t,
+    short: t.n > 1 && t.tools.length === 0 && t.prompt.length < SHORT_CHARS,
+    haiku: [],
+    state: 'unclassified',
+  }))
   if (turns.length) await update($, physical, () => turns)
   return turns.length
 }

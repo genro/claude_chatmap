@@ -6,6 +6,10 @@ reorganiser (Sonnet) regroups the turns into logical turns and topics.
 
 Usage:
     python tools/classify_offline.py <transcript.jsonl> [--out out] [--limit N] [--every 10]
+    python tools/classify_offline.py --dump-turns <session-id>
+
+--dump-turns prints the physical turns of a session's transcript as JSON, for
+the mod to import a chat's past turns, compacted ones included.
 
 Writes <out>/<session>.json, in the shape of the mod's state, and
 <out>/<session>.html, the grid page with that state embedded.
@@ -60,7 +64,7 @@ class Transcript:
 
     def prompt_text(self, record: dict) -> str | None:
         """The text the user typed, or None when the record is not a prompt."""
-        if record.get("type") != "user" or record.get("isMeta") or "toolUseResult" in record:
+        if record.get("type") != "user" or record.get("isMeta") or record.get("isCompactSummary") or "toolUseResult" in record:
             return None
         content = record["message"]["content"]
         if isinstance(content, str):
@@ -252,10 +256,27 @@ class ChatMap:
         }
 
 
+def dump_turns(session_id: str) -> None:
+    """Print the physical turns of a session's transcript, shaped as the mod records them."""
+    found = list((Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
+    if not found:
+        print("[]")
+        return
+    if len(found) > 1:
+        raise SystemExit(f"expected one transcript for {session_id}, found {len(found)}")
+    edge = ChatMap.ANSWER_EDGE
+    turns = []
+    for turn in Transcript(found[0]).turns():
+        answer = turn.answer if len(turn.answer) <= 2 * edge else f"{turn.answer[:edge]}\n[...]\n{turn.answer[-edge:]}"
+        turns.append({"n": turn.n, "prompt": turn.prompt[: ChatMap.PROMPT_TEXT], "answer": answer, "tools": sorted(set(turn.tools))})
+    print(json.dumps(turns, ensure_ascii=False))
+
+
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="Replay a past transcript through chatmap.")
-    parser.add_argument("transcript", type=Path)
+    parser.add_argument("transcript", type=Path, nargs="?")
+    parser.add_argument("--dump-turns", metavar="SESSION_ID", help="print a session's physical turns as JSON and exit")
     parser.add_argument("--out", type=Path, default=root / "out")
     parser.add_argument("--limit", type=int, help="replay only the first N physical turns")
     parser.add_argument("--every", type=int, default=10, help="reorganise every N physical turns")
@@ -263,6 +284,11 @@ def main() -> None:
     parser.add_argument("--reorganiser", default="sonnet")
     parser.add_argument("--short-chars", type=int, default=20)
     args = parser.parse_args()
+    if args.dump_turns:
+        dump_turns(args.dump_turns)
+        return
+    if args.transcript is None:
+        parser.error("a transcript path is required unless --dump-turns is given")
 
     transcript = Transcript(args.transcript)
     chatmap = ChatMap(
