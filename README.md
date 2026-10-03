@@ -2,10 +2,11 @@
 
 A Claude Code plugin (mod) that maps a conversation by topic.
 
-Status: exploration. No code yet.
+Status: M1 in use. Requires Claude Code 2.1.286+.
 
-- Each turn is assigned to a topic by a small model at the end of the turn.
-- A side pane shows the topics as a grid and as threads across turns.
-- A topic can be kept, dropped from the conversation, or moved to a new one.
+- Every prompt is recorded as a physical turn; a small model (Haiku) places it under a topic when it is certain.
+- A larger model (Sonnet) regroups the turns into logical turns, with a short label and the request completed with the answers given, and names the topics.
+- A local server shows the map beside the chat: a grid of topics and a grid of turns, live.
+- `/chatmap` reorganises and prints the map's URL; `/chatmap full` rebuilds the map from scratch.
 
 Design notes: [docs/design.md](docs/design.md).

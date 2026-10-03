@@ -1,6 +1,9 @@
 {
   "name": "chatmap",
   "version": "0.1.0",
-  "description": "Classifies conversation turns into topics, shows them as a grid and threads, and lets you keep, drop or move a topic.",
-  "author": { "name": "Giovanni Porcari" }
+  "description": "Maps a conversation into topics and logical turns, live, in a page beside the chat.",
+  "author": {
+    "name": "Giovanni Porcari"
+  },
+  "types": "./types/index.d.ts"
 }
