@@ -16,6 +16,7 @@ const EVERY = 10
 const RECENT = 4
 const REVISABLE = 2
 const CHUNK = 30
+const RETRY_MS = 300000
 const SHORT_CHARS = 20
 const PROMPT_TEXT = 1500
 const ANSWER_EDGE = 600
@@ -123,6 +124,7 @@ async function reorganise($: EngineInterface, full: boolean): Promise<void> {
   }
   const reply = (await ask($, REORGANISER, 'reorganizer.md', payload, 16000)) as ReorganiserReply
 
+  reply.logical.sort((a, b) => a.physical[0] - b.physical[0])
   const got = reply.logical.flatMap(l => l.physical)
   if (got.join(',') !== span.join(',')) throw new Error(`reorganiser covered turns ${got.join(',')}, expected ${span.join(',')}`)
   const merge = Object.fromEntries((reply.merge ?? []).map(m => [m.from, m.into]))
@@ -220,11 +222,12 @@ async function edit($: EngineInterface, id: string, title: string, description: 
   })
 }
 
-type Lane = { queue: Promise<void>; url: string; backlog: boolean }
+type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number }
 
 async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const placed = await place($)
-  const due = mode !== 'none' || placed.newSubject || (await pending($)) >= EVERY
+  const resting = mode === 'none' && (await $.clock.now()) - lane.failedAt < RETRY_MS
+  const due = mode !== 'none' || (!resting && (placed.newSubject || (await pending($)) >= EVERY))
   if (due) {
     let full = mode === 'full'
     try {
@@ -234,7 +237,8 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
         await publish($, lane)
       } while ((await pending($)) >= (mode === 'none' && !placed.newSubject ? EVERY : 1))
     } catch (error) {
-      $.ui.toast(`reorganisation failed: ${(error as Error).message}`)
+      lane.failedAt = await $.clock.now()
+      $.ui.toast(`reorganisation failed, next automatic try in ${RETRY_MS / 60000} minutes: ${(error as Error).message}`)
     }
   }
   if (placed.count || due) await publish($, lane)
@@ -307,7 +311,7 @@ async function serve($: EngineInterface, lane: Lane): Promise<void> {
 
 export const register: Register = on => {
   let tools: string[] = []
-  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false }
+  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0 }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
