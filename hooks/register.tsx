@@ -15,6 +15,7 @@ const REORGANISER = 'sonnet'
 const EVERY = 10
 const RECENT = 4
 const REVISABLE = 2
+const CHUNK = 30
 const SHORT_CHARS = 20
 const PROMPT_TEXT = 1500
 const ANSWER_EDGE = 600
@@ -105,7 +106,7 @@ async function reorganise($: EngineInterface, full: boolean): Promise<void> {
   const all = await read($, topics)
   const known = full ? Object.fromEntries(Object.entries(all).filter(([, t]) => t.fixed)) : all
   const covered = done.length ? done[done.length - 1].physical[done[done.length - 1].physical.length - 1] : 0
-  const fresh = turns.filter(p => p.n > covered && p.state !== 'running')
+  const fresh = turns.filter(p => p.n > covered && p.state !== 'running').slice(0, CHUNK)
   if (!fresh.length) return
   const unlabelled = done.findIndex(l => !l.label)
   const from = Math.max(0, unlabelled >= 0 ? Math.min(unlabelled, done.length - REVISABLE) : done.length - REVISABLE)
@@ -219,14 +220,19 @@ async function edit($: EngineInterface, id: string, title: string, description: 
   })
 }
 
-type Lane = { queue: Promise<void>; url: string }
+type Lane = { queue: Promise<void>; url: string; backlog: boolean }
 
 async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const placed = await place($)
   const due = mode !== 'none' || placed.newSubject || (await pending($)) >= EVERY
   if (due) {
+    let full = mode === 'full'
     try {
-      await reorganise($, mode === 'full')
+      do {
+        await reorganise($, full)
+        full = false
+        await publish($, lane)
+      } while ((await pending($)) >= (mode === 'none' && !placed.newSubject ? EVERY : 1))
     } catch (error) {
       $.ui.toast(`reorganisation failed: ${(error as Error).message}`)
     }
@@ -237,7 +243,9 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
 function work($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   lane.queue = lane.queue.then(async () => {
     const asked = await actions($, lane)
-    return step($, asked === 'full' || mode === 'full' ? 'full' : asked === 'step' || mode === 'step' ? 'step' : 'none', lane)
+    const backlog = lane.backlog
+    lane.backlog = false
+    return step($, asked === 'full' || mode === 'full' ? 'full' : asked === 'step' || mode === 'step' || backlog ? 'step' : 'none', lane)
   })
   return lane.queue
 }
@@ -246,6 +254,28 @@ function portOf(session: string): number {
   let hash = 0
   for (const char of session) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
   return PORT_BASE + (hash % PORT_RANGE)
+}
+
+async function importHistory($: EngineInterface): Promise<number> {
+  if ((await read($, physical)).length) return 0
+  const turns: Physical[] = []
+  for (const message of await $.session.messages()) {
+    const text = message.text.trim()
+    if (message.role === 'user' && !message.toolResults?.length && text && !text.startsWith('<')) {
+      turns.push({ n: turns.length + 1, prompt: text.slice(0, PROMPT_TEXT), answer: '', tools: [], short: false, haiku: [], state: 'unclassified' })
+      continue
+    }
+    const turn = turns[turns.length - 1]
+    if (!turn || message.role !== 'assistant') continue
+    if (text) turn.answer = edges(text)
+    turn.tools.push(...message.toolUses.map(use => use.tool))
+  }
+  for (const turn of turns) {
+    turn.tools = [...new Set(turn.tools)]
+    turn.short = turn.n > 1 && turn.tools.length === 0 && turn.prompt.length < SHORT_CHARS
+  }
+  if (turns.length) await update($, physical, () => turns)
+  return turns.length
 }
 
 async function dropNotifications($: EngineInterface): Promise<void> {
@@ -276,12 +306,13 @@ async function serve($: EngineInterface, lane: Lane): Promise<void> {
 
 export const register: Register = on => {
   let tools: string[] = []
-  const lane: Lane = { queue: Promise.resolve(), url: '' }
+  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'chatmap', description: 'Reorganise this conversation (full: rebuild from scratch) and show the URL of its map', argumentHint: '[full]' })
     await dropNotifications($)
+    lane.backlog = (await importHistory($)) > 0
     void serve($, lane)
     $.clock.every(TICK_MS, () => {
       void work($, 'none', lane)
