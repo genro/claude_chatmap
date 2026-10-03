@@ -371,6 +371,11 @@ export const register: Register = on => {
     await work($, e.args.trim() === 'full' ? 'full' : 'step', lane)
     const done = await read($, logical)
     const all = await read($, topics)
+    if (lane.url) {
+      void $.prompt.submit({
+        text: `Open ${lane.url} in the Browser pane beside the chat: it is the chatmap of this conversation. Answer with one short line.`,
+      })
+    }
     return { text: `${(await read($, physical)).length} physical turns, ${done.length} logical turns, ${Object.keys(all).length} topics. Map: ${lane.url || 'server not started'}` }
   })
 }
