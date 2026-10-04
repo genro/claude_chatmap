@@ -10,6 +10,8 @@ export type Physical = {
   state: 'running' | 'queued' | 'placed' | 'unclassified'
 }
 
+export type Spent = { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }
+
 export type Logical = { physical: number[]; label: string; prompt: string; outcome: string; topics: string[]; block: string; pass: number }
 
 declare module 'claude-code' {
@@ -21,6 +23,7 @@ declare module 'claude-code' {
       physical: Physical[]
       logical: Logical[]
       passes: number
+      usage: Record<string, Spent>
     }
   }
 }

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Logical, Physical, Topic } from '../types'
+import type { Logical, Physical, Spent, Topic } from '../types'
 
 const topics = atom({ plugin: 'chatmap', key: 'topics' } as const, {} as Record<string, Topic>)
 const topicCount = atom({ plugin: 'chatmap', key: 'topicCount' } as const, 0)
@@ -9,6 +9,7 @@ const primary = atom({ plugin: 'chatmap', key: 'primary' } as const, '')
 const physical = atom({ plugin: 'chatmap', key: 'physical' } as const, [] as Physical[])
 const logical = atom({ plugin: 'chatmap', key: 'logical' } as const, [] as Logical[])
 const passes = atom({ plugin: 'chatmap', key: 'passes' } as const, 0)
+const usage = atom({ plugin: 'chatmap', key: 'usage' } as const, {} as Record<string, Spent>)
 
 const CLASSIFIER = 'haiku'
 const REORGANISER = 'sonnet'
@@ -32,6 +33,7 @@ type Saved = {
   physical: Physical[]
   logical: Logical[]
   passes: number
+  usage?: Record<string, Spent>
 }
 
 type ClassifierReply = { assign: string[]; newSubject?: boolean }
@@ -50,6 +52,20 @@ function edges(answer: string): string {
 async function ask($: EngineInterface, model: string, file: string, payload: unknown, maxTokens: number): Promise<unknown> {
   const system = await $.fs.read(`${$.plugin.root}/prompts/${file}`)
   const reply = await $.model.complete({ model, system, prompt: JSON.stringify(payload), maxTokens })
+  const used = reply.usage
+  await update($, usage, all => {
+    const was = all[model] ?? { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    return {
+      ...all,
+      [model]: {
+        calls: was.calls + 1,
+        input: was.input + used.input_tokens,
+        output: was.output + used.output_tokens,
+        cacheRead: was.cacheRead + used.cache_read_input_tokens,
+        cacheWrite: was.cacheWrite + used.cache_creation_input_tokens,
+      },
+    }
+  })
   if (!reply.isAnswered) throw new Error(`${model} did not answer: ${reply.reason}`)
   const start = reply.text.indexOf('{')
   const end = reply.text.lastIndexOf('}')
@@ -185,6 +201,7 @@ async function snapshot($: EngineInterface): Promise<unknown> {
     session: await $.session.id(),
     title: cwd.split('/').pop() ?? cwd,
     models: { classifier: CLASSIFIER, reorganiser: REORGANISER },
+    usage: await read($, usage),
     primary: await read($, primary),
     topics: await read($, topics),
     logical: done,
@@ -209,6 +226,7 @@ async function save($: EngineInterface): Promise<void> {
     physical: await read($, physical),
     logical: await read($, logical),
     passes: await read($, passes),
+    usage: await read($, usage),
   }
   await $.fs.write(await savedPath($), JSON.stringify(saved))
 }
@@ -224,6 +242,7 @@ async function restore($: EngineInterface): Promise<boolean> {
   await update($, physical, () => saved.physical.map(p => (p.state === 'running' ? { ...p, state: 'queued' } : p)))
   await update($, logical, () => saved.logical)
   await update($, passes, () => saved.passes)
+  await update($, usage, () => saved.usage ?? {})
   return true
 }
 

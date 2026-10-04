@@ -90,6 +90,8 @@ header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1p
 .more .pa{color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;font-size:.82rem}
 .agree{color:var(--ok)} .disagree{color:var(--bad)}
 .empty{padding:14px 10px;color:var(--muted)}
+.usage{font:.68rem var(--mono);color:var(--muted);padding:4px 10px;border-bottom:1px solid var(--line)}
+.usage:empty{display:none}
 .lanes{display:flex;align-self:stretch;margin:-2px 0}
 .lanes{border-left:1px solid var(--line)}
 .lane{width:16px;flex:none;display:flex;border-right:1px solid var(--line)}
@@ -108,6 +110,7 @@ header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1p
   <button class="btn dark" id="reorganise" title="Reorganise the latest turns now">↻</button>
   <button class="btn" id="rebuild" title="Rebuild topics, blocks and labels from the whole conversation">Rebuild</button>
 </header>
+<div class="usage" id="usage"></div>
 
 <div class="section">Topics <span class="sp"></span><span id="counts"></span></div>
 <div class="topics" id="topics"></div>
@@ -201,6 +204,10 @@ class Grid {
     const d = this.data;
     document.getElementById("live").className = d.live ? "live" : "live off";
     document.getElementById("where").textContent = `${d.title} · ${d.session.slice(0, 8)}`;
+    const k = n => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+    const spent = Object.entries(d.usage || {}).map(([model, u]) =>
+      `${model} ${u.calls} calls · ${k(u.input + u.cacheRead + u.cacheWrite)} in · ${k(u.output)} out`);
+    document.getElementById("usage").textContent = spent.length ? `Tokens · ${spent.join(" | ")}` : "";
     document.getElementById("counts").textContent = `${d.logical.length} logical · ${d.physical.length} physical`;
   }
 
