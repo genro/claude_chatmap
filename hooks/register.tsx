@@ -11,6 +11,7 @@ const logical = atom({ plugin: 'chatmap', key: 'logical' } as const, [] as Logic
 const passes = atom({ plugin: 'chatmap', key: 'passes' } as const, 0)
 const usage = atom({ plugin: 'chatmap', key: 'usage' } as const, {} as Record<string, Spent>)
 const enabled = atom({ plugin: 'chatmap', key: 'enabled' } as const, false)
+const linked = atom({ plugin: 'chatmap', key: 'linked' } as const, true)
 
 const CLASSIFIER = 'haiku'
 const REORGANISER = 'sonnet'
@@ -25,8 +26,7 @@ const ANSWER_EDGE = 600
 const TICK_MS = 1000
 const PERSON = ['composer', 'bridge', 'sdk']
 const SLASH = /^\/[\w:-]+(\s|$)/
-const PORT_BASE = 41000
-const PORT_RANGE = 8000
+const LINK = 'http://127.0.0.1:40999'
 
 type Saved = {
   topics: Record<string, Topic>
@@ -211,6 +211,9 @@ async function snapshot($: EngineInterface): Promise<unknown> {
     usage: await read($, usage),
     primary: await read($, primary),
     topics: await read($, topics),
+    topicCount: await read($, topicCount),
+    passes: await read($, passes),
+    enabled: await read($, enabled),
     logical: done,
     physical: turns,
     agreement: {
@@ -221,29 +224,23 @@ async function snapshot($: EngineInterface): Promise<unknown> {
   }
 }
 
-async function savedPath($: EngineInterface): Promise<string> {
-  return `${$.plugin.root}/out/state/${await $.session.id()}.json`
-}
-
-async function save($: EngineInterface): Promise<void> {
-  const saved: Saved = {
-    topics: await read($, topics),
-    topicCount: await read($, topicCount),
-    primary: await read($, primary),
-    physical: await read($, physical),
-    logical: await read($, logical),
-    passes: await read($, passes),
-    usage: await read($, usage),
-    enabled: await read($, enabled),
+async function link($: EngineInterface, path: string, body?: unknown): Promise<unknown> {
+  const init = body === undefined ? undefined : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  let reply
+  try {
+    reply = await $.http.fetch(`${LINK}/sessions/${await $.session.id()}${path}`, init)
+  } catch {
+    reply = null
   }
-  await $.fs.write(await savedPath($), JSON.stringify(saved))
+  const up = reply !== null && reply.ok
+  if ((await read($, linked)) !== up) await update($, linked, () => up)
+  if (!reply || !reply.ok) throw new Error(`sourcerer-link does not answer on ${LINK}: start it with \`sourcerer-link serve\``)
+  return JSON.parse(reply.text)
 }
 
-async function restore($: EngineInterface): Promise<boolean> {
+async function restore($: EngineInterface, saved: Saved | null): Promise<boolean> {
   if ((await read($, physical)).length) return true
-  const path = await savedPath($)
-  if (!(await $.fs.exists(path))) return false
-  const saved = JSON.parse(await $.fs.read(path)) as Saved
+  if (!saved) return false
   await update($, topics, () => saved.topics)
   await update($, topicCount, () => saved.topicCount)
   await update($, primary, () => saved.primary)
@@ -254,36 +251,32 @@ async function restore($: EngineInterface): Promise<boolean> {
   return true
 }
 
-async function savedOn($: EngineInterface): Promise<boolean> {
-  const path = await savedPath($)
-  return (await $.fs.exists(path)) && (JSON.parse(await $.fs.read(path)) as Saved).enabled === true
-}
-
-async function publish($: EngineInterface, lane: Lane): Promise<void> {
-  await save($)
-  if (!lane.url) return
-  await $.http.fetch(`${lane.url}/state`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(await snapshot($)),
-  })
+async function publish($: EngineInterface): Promise<void> {
+  try {
+    await link($, '/state', await snapshot($))
+  } catch {
+    // the footer shows `link off`; the next publish sends the whole map again
+  }
 }
 
 type Action = { kind: 'reorganise' } | { kind: 'rebuild' } | { kind: 'edit'; id: string; title: string; description: string }
 
 type Mode = 'none' | 'step' | 'full'
 
-async function actions($: EngineInterface, lane: Lane): Promise<Mode> {
-  if (!lane.url) return 'none'
-  const reply = await $.http.fetch(`${lane.url}/actions`)
-  const list = JSON.parse(reply.text) as Action[]
+async function actions($: EngineInterface): Promise<Mode> {
+  let list: Action[]
+  try {
+    list = (await link($, '/inbox')) as Action[]
+  } catch {
+    return 'none'
+  }
   let mode: Mode = 'none'
   for (const action of list) {
     if (action.kind === 'rebuild') mode = 'full'
     else if (action.kind === 'reorganise') mode = mode === 'full' ? 'full' : 'step'
     else await edit($, action.id, action.title, action.description)
   }
-  if (list.length) await publish($, lane)
+  if (list.length) await publish($)
   return mode
 }
 
@@ -294,7 +287,7 @@ async function edit($: EngineInterface, id: string, title: string, description: 
   })
 }
 
-type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number; serving: boolean; paneDue: boolean; tick?: Timer }
+type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number; tick?: Timer }
 
 async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const placed = await place($)
@@ -306,30 +299,24 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
       do {
         await reorganise($, full)
         full = false
-        await publish($, lane)
+        await publish($)
       } while ((await pending($)) >= (mode === 'none' && !placed.newSubject ? EVERY : 1))
     } catch (error) {
       lane.failedAt = await $.clock.now()
       $.ui.toast(`reorganisation failed, next automatic try in ${RETRY_MS / 60000} minutes: ${(error as Error).message}`)
     }
   }
-  if (placed.count || due) await publish($, lane)
+  if (placed.count || due) await publish($)
 }
 
 function work($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   lane.queue = lane.queue.then(async () => {
-    const asked = await actions($, lane)
+    const asked = await actions($)
     const backlog = lane.backlog
     lane.backlog = false
     return step($, asked === 'full' || mode === 'full' ? 'full' : asked === 'step' || mode === 'step' || backlog ? 'step' : 'none', lane)
   })
   return lane.queue
-}
-
-function portOf(session: string): number {
-  let hash = 0
-  for (const char of session) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
-  return PORT_BASE + (hash % PORT_RANGE)
 }
 
 type Imported = { n: number; prompt: string; answer: string; tools: string[] }
@@ -364,45 +351,29 @@ async function dropNotifications($: EngineInterface): Promise<void> {
   )
 }
 
-async function serve($: EngineInterface, lane: Lane): Promise<void> {
-  const server = $.process.spawn({
-    argv: ['python3', `${$.plugin.root}/server/chatmap_server.py`, '--root', $.plugin.root, '--port', String(portOf(await $.session.id()))],
-  })
-  for await (const { stream, text } of server) {
-    const found = text.match(/chatmap on (http:\/\/127\.0\.0\.1:\d+)/)
-    if (found) {
-      lane.url = found[1]
-      await publish($, lane)
-      if (lane.paneDue) openPane($, lane)
-    } else if (stream === 'stderr') {
-      $.ui.log(text, { to: 'debug' })
-    }
+async function savedOn($: EngineInterface): Promise<boolean> {
+  try {
+    return ((await link($, '/state')) as Saved | null)?.enabled === true
+  } catch {
+    return false
   }
-  lane.url = ''
-  lane.serving = false
-  $.ui.toast('chatmap server stopped')
 }
 
 async function turnOn($: EngineInterface, lane: Lane): Promise<void> {
+  const cwd = await $.session.cwd()
+  await link($, '', { cwd, title: cwd.split('/').pop() ?? cwd, page: `${$.plugin.root}/tools/grid.html` })
+  const saved = (await link($, '/state')) as Saved | null
   await update($, enabled, () => true)
-  if (!(await restore($))) lane.backlog = (await importHistory($)) > 0
+  if (!(await restore($, saved))) lane.backlog = (await importHistory($)) > 0
   await dropNotifications($)
-  if (!lane.serving) {
-    lane.serving = true
-    void serve($, lane)
-  }
+  lane.url = `${LINK}/s/${await $.session.id()}/`
   lane.tick ??= $.clock.every(TICK_MS, () => {
     void work($, 'none', lane)
   })
-  await publish($, lane)
+  await publish($)
 }
 
 function openPane($: EngineInterface, lane: Lane): void {
-  if (!lane.url) {
-    lane.paneDue = true
-    return
-  }
-  lane.paneDue = false
   void $.prompt.submit({
     text: `Open ${lane.url} in the Browser pane beside the chat: it is the chatmap of this conversation. Answer with one short line.`,
   })
@@ -412,7 +383,7 @@ async function turnOff($: EngineInterface, lane: Lane): Promise<void> {
   lane.tick?.cancel()
   lane.tick = undefined
   await update($, enabled, () => false)
-  await save($)
+  await publish($)
 }
 
 async function confirmOn($: EngineInterface): Promise<boolean> {
@@ -426,29 +397,40 @@ async function confirmOn($: EngineInterface): Promise<boolean> {
 async function toggle($: EngineInterface, lane: Lane): Promise<void> {
   if (await read($, enabled)) await turnOff($, lane)
   else if (await confirmOn($)) {
-    await turnOn($, lane)
-    openPane($, lane)
+    try {
+      await turnOn($, lane)
+      openPane($, lane)
+    } catch (error) {
+      $.ui.toast(`chatmap stays off: ${(error as Error).message}`)
+    }
   }
 }
 
 export const register: Register = on => {
   let tools: string[] = []
-  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0, serving: false, paneDue: false }
+  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0 }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'chatmap', description: 'Reorganise this conversation (full: rebuild from scratch) and show the URL of its map', argumentHint: '[full]' })
-    if ((await read($, enabled)) || (await savedOn($))) await turnOn($, lane)
+    if ((await read($, enabled)) || (await savedOn($))) {
+      try {
+        await turnOn($, lane)
+      } catch (error) {
+        $.ui.toast(`chatmap: ${(error as Error).message}`)
+      }
+    }
     return result
   })
 
   on('ui.render', { component: 'SessionMode' }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const active = await read($, enabled)
+    const up = await read($, linked)
     return (
       <Box flexDirection="row" gap={1}>
         {e.props.modes.length ? <Text dimColor>{e.props.modes.join(' & ')}</Text> : null}
-        <Button key="chatmap" label={active ? 'chatmap on' : 'chatmap off'} plain onPress={() => void toggle($, lane)} />
+        <Button key="chatmap" label={!active ? 'chatmap off' : up ? 'chatmap on' : 'chatmap on · link off'} plain onPress={() => void toggle($, lane)} />
       </Box>
     )
   })
@@ -460,7 +442,7 @@ export const register: Register = on => {
     if (e.turnId !== undefined && running) {
       const added = `${running.prompt}\n\n[during the turn] ${e.text}`.slice(0, PROMPT_TEXT)
       await update($, physical, list => list.map(p => (p.n === running.n ? { ...p, prompt: added } : p)))
-      await publish($, lane)
+      await publish($)
       return next(e)
     }
     tools = []
@@ -474,7 +456,7 @@ export const register: Register = on => {
       state: 'running',
     }
     await update($, physical, list => [...list, turn])
-    await publish($, lane)
+    await publish($)
     return next(e)
   })
 
@@ -496,19 +478,23 @@ export const register: Register = on => {
       state: 'queued',
     }
     await update($, physical, list => list.map(p => (p.n === done.n ? done : p)))
-    await publish($, lane)
+    await publish($)
     return result
   })
 
   on('command.run', { command: 'chatmap' }, async ($, e) => {
     if (!(await read($, enabled))) {
       if (!(await confirmOn($))) return { text: 'chatmap stays off' }
-      await turnOn($, lane)
+      try {
+        await turnOn($, lane)
+      } catch (error) {
+        return { text: `chatmap stays off: ${(error as Error).message}` }
+      }
     }
     await work($, e.args.trim() === 'full' ? 'full' : 'step', lane)
     const done = await read($, logical)
     const all = await read($, topics)
     openPane($, lane)
-    return { text: `${(await read($, physical)).length} physical turns, ${done.length} logical turns, ${Object.keys(all).length} topics. Map: ${lane.url || 'server not started'}` }
+    return { text: `${(await read($, physical)).length} physical turns, ${done.length} logical turns, ${Object.keys(all).length} topics. Map: ${lane.url}` }
   })
 }

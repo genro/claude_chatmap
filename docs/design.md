@@ -8,7 +8,7 @@ A conversation has one primary topic and secondary topics that pollute it.
 The primary topic is often recognisable only afterwards.
 
 ## Milestones
-- M1, collect and classify: physical turns recorded live, the Haiku classifier, the Sonnet reorganiser, the state in `$.state`, a local server with the map page.
+- M1, collect and classify: physical turns recorded live, the Haiku classifier, the Sonnet reorganiser, the state in `$.state`, the map page served by sourcerer-link.
 - M2, visualise further: done so far, persistence across app restarts and import of the turns a chat had before the mod loaded.
 - M3, use: decided after M2. Drop, move, the replacement message, engine compaction.
 
@@ -16,8 +16,7 @@ The primary topic is often recognisable only afterwards.
 - `hooks/register.tsx`: the mod.
 - `types/index.d.ts`: the contract of its `$.state`.
 - `prompts/classifier.md`, `prompts/reorganizer.md`: the two model prompts, read at run time.
-- `server/chatmap_server.py`: the local server, stdlib only.
-- `tools/grid.html`: the map page, served by the server and used by the offline script.
+- `tools/grid.html`: the map page, served by sourcerer-link and used by the offline script.
 - `tools/classify_offline.py`: replays a past transcript through the same prompts.
 
 ## Turns
@@ -29,14 +28,14 @@ The primary topic is often recognisable only afterwards.
 - Topic titles are English; labels, blocks, descriptions, completed prompts and outcomes are in the language of the conversation.
 
 ## On and off
-- chatmap starts off in every chat: no recording, no model calls, no server, no timer.
+- chatmap starts off in every chat: no recording, no model calls, no timer.
 - A Button in the footer (`SessionMode` site) reads `chatmap off` or `chatmap on`; the footer's own mode labels are drawn beside it.
 - The desktop app loads the mod when the chat's process starts, at the first message: the Button appears only then.
 - Turning on asks for confirmation (`$.ui.ask`); a dismissed dialog keeps it off. `/chatmap` on a chat that is off asks the same.
-- Turning on restores the saved map, or imports the past turns when there is none, then starts the server and the timer.
-- Turning on from the footer or with `/chatmap` asks the model to open the map in the Browser pane, once the server has printed its URL: a mod cannot open the pane itself. The model's `preview_start` loads the page in a hidden pane; no tool shows it, the user opens it from the card in the transcript.
-- Turning off stops the timer and the recording; the server lives until the mod ends.
-- The flag `enabled` is saved with the map in `out/state/<session>.json`; a map saved without it is off.
+- Turning on restores the saved map, or imports the past turns when there is none, then starts the timer. It needs sourcerer-link running: if the link does not answer, chatmap stays off with a toast.
+- Turning on from the footer or with `/chatmap` asks the model to open the map in the Browser pane: a mod cannot open the pane itself. The model's `preview_start` loads the page in a hidden pane; no tool shows it, the user opens it from the card in the transcript.
+- Turning off stops the timer and the recording.
+- The flag `enabled` is saved with the map by sourcerer-link; a map saved without it is off.
 
 ## Recording
 - `prompt.submit` records a physical turn as `running` and publishes the map at once.
@@ -59,11 +58,13 @@ The primary topic is often recognisable only afterwards.
 - `$.model.complete({ model, system, prompt, maxTokens })` runs both models; the reply's JSON is checked and a reply that names unknown topics or misses turns is refused with a toast.
 
 ## Server and page
-- Turning chatmap on spawns the server (`$.process.spawn`); it lives as long as the mod.
-- The port is derived from the session id (41000 to 48999), so the page stays valid across mod reloads; the server retries a busy port for 10 s.
-- The mod posts the whole map (`POST /state`) after every change; open pages receive it as a server-sent event (`GET /events`), and get the current map on connect.
-- The page queues actions (`POST /action`): reorganise, rebuild, edit a topic. The mod takes them every second (`GET /actions`).
-- `/chatmap` reorganises and returns the URL; the Browser pane opens it beside the chat.
+- sourcerer-link (repo `sourcerer-link`) is one process per machine on `127.0.0.1:40999`, started at login; it serves the maps of all chats.
+- Turning on registers the chat (`POST /sessions/<id>`: working directory, title, path of `tools/grid.html`).
+- The mod posts the whole map (`POST /sessions/<id>/state`) after every change; the link saves it and sends it to the open pages as a server-sent event.
+- The page queues actions (`POST /s/<id>/action`): reorganise, rebuild, edit a topic. The mod takes them every second (`GET /sessions/<id>/inbox`).
+- `/` lists the chats; `/s/<id>/` is one chat's map.
+- When the link does not answer, the footer reads `chatmap on · link off`; the next publish sends the whole map again.
+- `/chatmap` reorganises and returns the URL.
 - The page follows the app's light or dark theme.
 
 ## Page
@@ -75,7 +76,7 @@ The primary topic is often recognisable only afterwards.
 
 ## State
 - `$.state` (`chatmap`): topics, topic counter, primary topic, physical turns, logical turns, pass counter.
-- Every publish also writes the map to `out/state/<session>.json` under the plugin root. At load the mod restores it; only a chat with no saved map imports its past turns from the transcript.
+- sourcerer-link saves every posted map in its data folder (`chatmap/<session>.json`). Turning on restores it; only a chat with no saved map imports its past turns from the transcript.
 - Turns are numbered by position, the next number after the last recorded; numbers of dropped turns are not reused.
 - `$.session.messages()` returns no uuid; `handle` exists only inside a `session.compact` hook.
 

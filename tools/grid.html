@@ -197,7 +197,7 @@ class Grid {
   }
 
   send(action) {
-    return fetch("/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
+    return fetch("action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
   }
 
   drawHeader() {
@@ -332,7 +332,7 @@ const grid = new Grid(DATA || EMPTY);
 grid.bind();
 grid.draw();
 if (location.protocol.startsWith("http")) {
-  const events = new EventSource("/events");
+  const events = new EventSource("events");
   events.addEventListener("state", e => {
     grid.setData(JSON.parse(e.data));
     grid.busy = false;
