@@ -23,6 +23,7 @@ const PROMPT_TEXT = 1500
 const ANSWER_EDGE = 600
 const TICK_MS = 1000
 const PERSON = ['composer', 'bridge', 'sdk']
+const SLASH = /^\/[\w:-]+(\s|$)/
 const PORT_BASE = 41000
 const PORT_RANGE = 8000
 
@@ -389,7 +390,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (e.text.startsWith('/') || !PERSON.includes(e.origin.kind)) return next(e)
+    if (SLASH.test(e.text) || !PERSON.includes(e.origin.kind)) return next(e)
     const turns = await read($, physical)
     const running = turns.find(p => p.state === 'running')
     if (e.turnId !== undefined && running) {
