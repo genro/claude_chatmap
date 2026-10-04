@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Logical, Physical, Spent, Topic } from '../types'
 
@@ -10,6 +10,7 @@ const physical = atom({ plugin: 'chatmap', key: 'physical' } as const, [] as Phy
 const logical = atom({ plugin: 'chatmap', key: 'logical' } as const, [] as Logical[])
 const passes = atom({ plugin: 'chatmap', key: 'passes' } as const, 0)
 const usage = atom({ plugin: 'chatmap', key: 'usage' } as const, {} as Record<string, Spent>)
+const enabled = atom({ plugin: 'chatmap', key: 'enabled' } as const, false)
 
 const CLASSIFIER = 'haiku'
 const REORGANISER = 'sonnet'
@@ -35,6 +36,7 @@ type Saved = {
   logical: Logical[]
   passes: number
   usage?: Record<string, Spent>
+  enabled?: boolean
 }
 
 type ClassifierReply = { assign: string[]; newSubject?: boolean }
@@ -232,6 +234,7 @@ async function save($: EngineInterface): Promise<void> {
     logical: await read($, logical),
     passes: await read($, passes),
     usage: await read($, usage),
+    enabled: await read($, enabled),
   }
   await $.fs.write(await savedPath($), JSON.stringify(saved))
 }
@@ -249,6 +252,11 @@ async function restore($: EngineInterface): Promise<boolean> {
   await update($, passes, () => saved.passes)
   await update($, usage, () => saved.usage ?? {})
   return true
+}
+
+async function savedOn($: EngineInterface): Promise<boolean> {
+  const path = await savedPath($)
+  return (await $.fs.exists(path)) && (JSON.parse(await $.fs.read(path)) as Saved).enabled === true
 }
 
 async function publish($: EngineInterface, lane: Lane): Promise<void> {
@@ -286,7 +294,7 @@ async function edit($: EngineInterface, id: string, title: string, description: 
   })
 }
 
-type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number }
+type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number; serving: boolean; paneDue: boolean; tick?: Timer }
 
 async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const placed = await place($)
@@ -365,32 +373,88 @@ async function serve($: EngineInterface, lane: Lane): Promise<void> {
     if (found) {
       lane.url = found[1]
       await publish($, lane)
+      if (lane.paneDue) openPane($, lane)
     } else if (stream === 'stderr') {
       $.ui.log(text, { to: 'debug' })
     }
   }
   lane.url = ''
+  lane.serving = false
   $.ui.toast('chatmap server stopped')
+}
+
+async function turnOn($: EngineInterface, lane: Lane): Promise<void> {
+  await update($, enabled, () => true)
+  if (!(await restore($))) lane.backlog = (await importHistory($)) > 0
+  await dropNotifications($)
+  if (!lane.serving) {
+    lane.serving = true
+    void serve($, lane)
+  }
+  lane.tick ??= $.clock.every(TICK_MS, () => {
+    void work($, 'none', lane)
+  })
+  await publish($, lane)
+}
+
+function openPane($: EngineInterface, lane: Lane): void {
+  if (!lane.url) {
+    lane.paneDue = true
+    return
+  }
+  lane.paneDue = false
+  void $.prompt.submit({
+    text: `Open ${lane.url} in the Browser pane beside the chat: it is the chatmap of this conversation. Answer with one short line.`,
+  })
+}
+
+async function turnOff($: EngineInterface, lane: Lane): Promise<void> {
+  lane.tick?.cancel()
+  lane.tick = undefined
+  await update($, enabled, () => false)
+  await save($)
+}
+
+async function confirmOn($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.ask('Turn on chatmap for this chat? It records every turn and calls Haiku and Sonnet.', ['Turn on', 'Cancel'])) === 'Turn on'
+  } catch {
+    return false
+  }
+}
+
+async function toggle($: EngineInterface, lane: Lane): Promise<void> {
+  if (await read($, enabled)) await turnOff($, lane)
+  else if (await confirmOn($)) {
+    await turnOn($, lane)
+    openPane($, lane)
+  }
 }
 
 export const register: Register = on => {
   let tools: string[] = []
-  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0 }
+  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0, serving: false, paneDue: false }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'chatmap', description: 'Reorganise this conversation (full: rebuild from scratch) and show the URL of its map', argumentHint: '[full]' })
-    if (!(await restore($))) lane.backlog = (await importHistory($)) > 0
-    await dropNotifications($)
-    void serve($, lane)
-    $.clock.every(TICK_MS, () => {
-      void work($, 'none', lane)
-    })
+    if ((await read($, enabled)) || (await savedOn($))) await turnOn($, lane)
     return result
   })
 
+  on('ui.render', { component: 'SessionMode' }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const active = await read($, enabled)
+    return (
+      <Box flexDirection="row" gap={1}>
+        {e.props.modes.length ? <Text dimColor>{e.props.modes.join(' & ')}</Text> : null}
+        <Button key="chatmap" label={active ? 'chatmap on' : 'chatmap off'} plain onPress={() => void toggle($, lane)} />
+      </Box>
+    )
+  })
+
   on('prompt.submit', async ($, e, next) => {
-    if (SLASH.test(e.text) || !PERSON.includes(e.origin.kind)) return next(e)
+    if (SLASH.test(e.text) || !PERSON.includes(e.origin.kind) || !(await read($, enabled))) return next(e)
     const turns = await read($, physical)
     const running = turns.find(p => p.state === 'running')
     if (e.turnId !== undefined && running) {
@@ -421,7 +485,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId !== undefined) return result
+    if (e.agentId !== undefined || !(await read($, enabled))) return result
     const running = (await read($, physical)).find(p => p.state === 'running')
     if (!running) return result
     const done: Physical = {
@@ -437,14 +501,14 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'chatmap' }, async ($, e) => {
+    if (!(await read($, enabled))) {
+      if (!(await confirmOn($))) return { text: 'chatmap stays off' }
+      await turnOn($, lane)
+    }
     await work($, e.args.trim() === 'full' ? 'full' : 'step', lane)
     const done = await read($, logical)
     const all = await read($, topics)
-    if (lane.url) {
-      void $.prompt.submit({
-        text: `Open ${lane.url} in the Browser pane beside the chat: it is the chatmap of this conversation. Answer with one short line.`,
-      })
-    }
+    openPane($, lane)
     return { text: `${(await read($, physical)).length} physical turns, ${done.length} logical turns, ${Object.keys(all).length} topics. Map: ${lane.url || 'server not started'}` }
   })
 }

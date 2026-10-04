@@ -28,6 +28,16 @@ The primary topic is often recognisable only afterwards.
 - A topic groups logical turns; they need not be consecutive. Its title names the subject, never a generic word.
 - Topic titles are English; labels, blocks, descriptions, completed prompts and outcomes are in the language of the conversation.
 
+## On and off
+- chatmap starts off in every chat: no recording, no model calls, no server, no timer.
+- A Button in the footer (`SessionMode` site) reads `chatmap off` or `chatmap on`; the footer's own mode labels are drawn beside it.
+- The desktop app loads the mod when the chat's process starts, at the first message: the Button appears only then.
+- Turning on asks for confirmation (`$.ui.ask`); a dismissed dialog keeps it off. `/chatmap` on a chat that is off asks the same.
+- Turning on restores the saved map, or imports the past turns when there is none, then starts the server and the timer.
+- Turning on from the footer or with `/chatmap` asks the model to open the map in the Browser pane, once the server has printed its URL: a mod cannot open the pane itself. The model's `preview_start` loads the page in a hidden pane; no tool shows it, the user opens it from the card in the transcript.
+- Turning off stops the timer and the recording; the server lives until the mod ends.
+- The flag `enabled` is saved with the map in `out/state/<session>.json`; a map saved without it is off.
+
 ## Recording
 - `prompt.submit` records a physical turn as `running` and publishes the map at once.
 - Only prompts typed by the person are recorded: origin `composer`, `bridge` or `sdk`. Task notifications and messages from other sessions are not.
@@ -49,7 +59,7 @@ The primary topic is often recognisable only afterwards.
 - `$.model.complete({ model, system, prompt, maxTokens })` runs both models; the reply's JSON is checked and a reply that names unknown topics or misses turns is refused with a toast.
 
 ## Server and page
-- `session.start` spawns the server (`$.process.spawn`); it lives as long as the mod.
+- Turning chatmap on spawns the server (`$.process.spawn`); it lives as long as the mod.
 - The port is derived from the session id (41000 to 48999), so the page stays valid across mod reloads; the server retries a busy port for 10 s.
 - The mod posts the whole map (`POST /state`) after every change; open pages receive it as a server-sent event (`GET /events`), and get the current map on connect.
 - The page queues actions (`POST /action`): reorganise, rebuild, edit a topic. The mod takes them every second (`GET /actions`).

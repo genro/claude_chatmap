@@ -24,6 +24,7 @@ declare module 'claude-code' {
       logical: Logical[]
       passes: number
       usage: Record<string, Spent>
+      enabled: boolean
     }
   }
 }
