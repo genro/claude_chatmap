@@ -149,7 +149,11 @@ async function reorganise($: EngineInterface, full: boolean): Promise<void> {
   }
   const reply = (await ask($, REORGANISER, 'reorganizer.md', payload, 16000)) as ReorganiserReply
 
+  for (const l of reply.logical) l.physical.sort((a, b) => a - b)
   reply.logical.sort((a, b) => a.physical[0] - b.physical[0])
+  const at = new Map(span.map((n, i) => [n, i]))
+  const split = reply.logical.find(l => l.physical.some((n, i) => i > 0 && at.has(n) && at.has(l.physical[i - 1]) && at.get(n) !== at.get(l.physical[i - 1])! + 1))
+  if (split) throw new Error(`reorganiser grouped non-consecutive turns ${split.physical.join(',')}`)
   const got = reply.logical.flatMap(l => l.physical)
   if (got.join(',') !== span.join(',')) throw new Error(`reorganiser covered turns ${got.join(',')}, expected ${span.join(',')}`)
   const merge = Object.fromEntries((reply.merge ?? []).map(m => [m.from, m.into]))
