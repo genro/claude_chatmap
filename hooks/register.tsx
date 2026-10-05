@@ -14,6 +14,7 @@ const enabled = atom({ plugin: 'chatmap', key: 'enabled' } as const, false)
 const linked = atom({ plugin: 'chatmap', key: 'linked' } as const, true)
 const host = atom({ plugin: 'chatmap', key: 'host' } as const, '')
 const working = atom({ plugin: 'chatmap', key: 'working' } as const, false)
+const progress = atom({ plugin: 'chatmap', key: 'progress' } as const, null as { done: number; total: number } | null)
 
 const CLASSIFIER = 'haiku'
 const REORGANISER = 'sonnet'
@@ -228,6 +229,7 @@ async function snapshot($: EngineInterface): Promise<unknown> {
     passes: await read($, passes),
     enabled: await read($, enabled),
     working: await read($, working),
+    progress: await read($, progress),
     logical: done,
     physical: turns,
     agreement: {
@@ -308,13 +310,16 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const resting = mode === 'none' && (await $.clock.now()) - lane.failedAt < RETRY_MS
   const due = mode !== 'none' || (!resting && (placed.newSubject || (await pending($)) >= EVERY))
   if (due) {
-    await update($, working, () => true)
-    await publish($)
     let full = mode === 'full'
+    const waiting = full ? (await read($, physical)).filter(p => p.state !== 'running').length : await pending($)
+    await update($, working, () => true)
+    await update($, progress, () => ({ done: 0, total: Math.max(1, Math.ceil(waiting / CHUNK)) }))
+    await publish($)
     try {
       do {
         await reorganise($, full)
         full = false
+        await update($, progress, p => (p ? { done: p.done + 1, total: Math.max(p.total, p.done + 1) } : p))
         await publish($)
       } while ((await pending($)) >= (mode === 'none' && !placed.newSubject ? EVERY : 1))
     } catch (error) {
@@ -322,6 +327,7 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
       $.ui.toast(`reorganisation failed, next automatic try in ${RETRY_MS / 60000} minutes: ${(error as Error).message}`)
     } finally {
       await update($, working, () => false)
+      await update($, progress, () => null)
     }
   }
   if (placed.count || due) await publish($)

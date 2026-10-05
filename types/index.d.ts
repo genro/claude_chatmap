@@ -28,6 +28,7 @@ declare module 'claude-code' {
       linked: boolean
       host: string
       working: boolean
+      progress: { done: number; total: number } | null
     }
   }
 }

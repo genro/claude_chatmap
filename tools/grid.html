@@ -156,13 +156,18 @@ class Grid {
     if (!l.provisional) return "";
     const map = { running: ["run", "running"], queued: ["wait", "classifying"], placed: ["pend", "awaiting reorganisation"], unclassified: ["bad", "unclassified"] };
     const [cls, text] = map[l.provisional];
-    if (l.provisional === "placed") return `<button class="state pend go" title="Reorganise now">${this.busy ? "reorganising…" : text + " ↻"}</button>`;
+    if (l.provisional === "placed") return `<button class="state pend go" title="Reorganise now">${this.busy ? this.busyLabel("reorganising") : text + " ↻"}</button>`;
     return `<span class="state ${cls}">${text}</span>`;
   }
 
   pendingCount(group) {
     const n = group.filter(l => l.provisional).length;
-    return n ? `<button class="state pend go" title="Reorganise now">${this.busy ? "reorganising…" : `${n} awaiting reorganisation ↻`}</button>` : "";
+    return n ? `<button class="state pend go" title="Reorganise now">${this.busy ? this.busyLabel("reorganising") : `${n} awaiting reorganisation ↻`}</button>` : "";
+  }
+
+  busyLabel(word) {
+    const p = this.data.progress;
+    return p && p.total > 1 ? `${word}… ${Math.min(p.done + 1, p.total)}/${p.total}` : `${word}…`;
   }
 
   classifier(l) {
@@ -286,7 +291,7 @@ class Grid {
       if (rebuild.dataset.armed !== "1") {
         rebuild.dataset.armed = "1";
         rebuild.textContent = "Rebuild? click again";
-        setTimeout(() => { rebuild.dataset.armed = ""; rebuild.textContent = "Rebuild"; }, 4000);
+        setTimeout(() => { if (rebuild.dataset.armed === "1") { rebuild.dataset.armed = ""; rebuild.textContent = "Rebuild"; } }, 4000);
         return;
       }
       rebuild.dataset.armed = "";
@@ -343,7 +348,10 @@ if (location.protocol.startsWith("http")) {
     if (data.working) { grid.busy = true; grid.asked = false; }
     else if (!grid.asked || data.enabled === false) { grid.busy = false; grid.asked = false; }
     const rebuild = document.getElementById("rebuild");
-    if (!grid.busy && rebuild.textContent === "rebuilding…") { rebuild.textContent = "Rebuild"; rebuild.disabled = false; }
+    if (rebuild.textContent.startsWith("rebuilding…")) {
+      if (grid.busy) rebuild.textContent = grid.busyLabel("rebuilding");
+      else { rebuild.textContent = "Rebuild"; rebuild.disabled = false; }
+    }
     grid.draw();
     document.getElementById("reorganise").disabled = grid.busy;
   });
