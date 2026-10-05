@@ -12,6 +12,7 @@ const passes = atom({ plugin: 'chatmap', key: 'passes' } as const, 0)
 const usage = atom({ plugin: 'chatmap', key: 'usage' } as const, {} as Record<string, Spent>)
 const enabled = atom({ plugin: 'chatmap', key: 'enabled' } as const, false)
 const linked = atom({ plugin: 'chatmap', key: 'linked' } as const, true)
+const working = atom({ plugin: 'chatmap', key: 'working' } as const, false)
 
 const CLASSIFIER = 'haiku'
 const REORGANISER = 'sonnet'
@@ -214,6 +215,7 @@ async function snapshot($: EngineInterface): Promise<unknown> {
     topicCount: await read($, topicCount),
     passes: await read($, passes),
     enabled: await read($, enabled),
+    working: await read($, working),
     logical: done,
     physical: turns,
     agreement: {
@@ -294,6 +296,8 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const resting = mode === 'none' && (await $.clock.now()) - lane.failedAt < RETRY_MS
   const due = mode !== 'none' || (!resting && (placed.newSubject || (await pending($)) >= EVERY))
   if (due) {
+    await update($, working, () => true)
+    await publish($)
     let full = mode === 'full'
     try {
       do {
@@ -304,6 +308,8 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
     } catch (error) {
       lane.failedAt = await $.clock.now()
       $.ui.toast(`reorganisation failed, next automatic try in ${RETRY_MS / 60000} minutes: ${(error as Error).message}`)
+    } finally {
+      await update($, working, () => false)
     }
   }
   if (placed.count || due) await publish($)

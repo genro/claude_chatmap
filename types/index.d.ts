@@ -26,6 +26,7 @@ declare module 'claude-code' {
       usage: Record<string, Spent>
       enabled: boolean
       linked: boolean
+      working: boolean
     }
   }
 }

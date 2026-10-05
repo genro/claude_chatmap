@@ -276,6 +276,7 @@ class Grid {
     document.getElementById("reorganise").addEventListener("click", e => {
       e.currentTarget.disabled = true;
       this.busy = true;
+      this.asked = true;
       this.send({ kind: "reorganise" });
       this.drawTurns();
     });
@@ -291,6 +292,8 @@ class Grid {
       rebuild.dataset.armed = "";
       rebuild.textContent = "rebuilding…";
       rebuild.disabled = true;
+      this.busy = true;
+      this.asked = true;
       this.send({ kind: "rebuild" });
     });
     document.getElementById("topics").addEventListener("click", e => {
@@ -313,7 +316,7 @@ class Grid {
     });
     document.getElementById("turns").addEventListener("click", e => {
       if (e.target.closest(".go")) {
-        if (!this.busy && location.protocol.startsWith("http")) { this.busy = true; this.send({ kind: "reorganise" }); this.drawTurns(); }
+        if (!this.busy && location.protocol.startsWith("http")) { this.busy = true; this.asked = true; this.send({ kind: "reorganise" }); this.drawTurns(); }
         return;
       }
       const button = e.target.closest(".toggle"); if (!button) return;
@@ -334,12 +337,15 @@ grid.draw();
 if (location.protocol.startsWith("http")) {
   const events = new EventSource("events");
   events.addEventListener("state", e => {
-    grid.setData(JSON.parse(e.data));
-    grid.busy = false;
+    const data = JSON.parse(e.data);
+    grid.setData(data);
+    // A click waits for the mod to start working (asked), then for it to finish.
+    if (data.working) { grid.busy = true; grid.asked = false; }
+    else if (!grid.asked || data.enabled === false) { grid.busy = false; grid.asked = false; }
     const rebuild = document.getElementById("rebuild");
-    if (rebuild.textContent === "rebuilding…") { rebuild.textContent = "Rebuild"; rebuild.disabled = false; }
+    if (!grid.busy && rebuild.textContent === "rebuilding…") { rebuild.textContent = "Rebuild"; rebuild.disabled = false; }
     grid.draw();
-    document.getElementById("reorganise").disabled = false;
+    document.getElementById("reorganise").disabled = grid.busy;
   });
   events.onerror = () => { document.getElementById("live").className = "live off"; };
   events.onopen = () => { document.getElementById("live").className = "live"; };
