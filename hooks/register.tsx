@@ -12,6 +12,7 @@ const passes = atom({ plugin: 'chatmap', key: 'passes' } as const, 0)
 const usage = atom({ plugin: 'chatmap', key: 'usage' } as const, {} as Record<string, Spent>)
 const enabled = atom({ plugin: 'chatmap', key: 'enabled' } as const, false)
 const linked = atom({ plugin: 'chatmap', key: 'linked' } as const, true)
+const host = atom({ plugin: 'chatmap', key: 'host' } as const, '')
 const working = atom({ plugin: 'chatmap', key: 'working' } as const, false)
 
 const CLASSIFIER = 'haiku'
@@ -28,6 +29,10 @@ const TICK_MS = 1000
 const PERSON = ['composer', 'bridge', 'sdk']
 const SLASH = /^\/[\w:-]+(\s|$)/
 const LINK = 'http://127.0.0.1:40999'
+const OWN = 'http://127.0.0.1:40998'
+const HOST_RETRY_MS = 10000
+const MATCH_CHARS = 200
+const DURING = '[during the turn]'
 
 type Saved = {
   topics: Record<string, Topic>
@@ -155,6 +160,13 @@ async function reorganise($: EngineInterface, full: boolean): Promise<void> {
 
   for (const l of reply.logical) l.physical.sort((a, b) => a - b)
   reply.logical.sort((a, b) => a.physical[0] - b.physical[0])
+  // A physical turn the reorganiser put in two logical turns stays in the first one.
+  const used = new Set<number>()
+  for (const l of reply.logical) {
+    l.physical = l.physical.filter(n => !used.has(n))
+    for (const n of l.physical) used.add(n)
+  }
+  reply.logical = reply.logical.filter(l => l.physical.length > 0)
   const at = new Map(span.map((n, i) => [n, i]))
   const split = reply.logical.find(l => l.physical.some((n, i) => i > 0 && at.has(n) && at.has(l.physical[i - 1]) && at.get(n) !== at.get(l.physical[i - 1])! + 1))
   if (split) throw new Error(`reorganiser grouped non-consecutive turns ${split.physical.join(',')}`)
@@ -230,13 +242,13 @@ async function link($: EngineInterface, path: string, body?: unknown): Promise<u
   const init = body === undefined ? undefined : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
   let reply
   try {
-    reply = await $.http.fetch(`${LINK}/sessions/${await $.session.id()}${path}`, init)
+    reply = await $.http.fetch(`${await read($, host)}/sessions/${await $.session.id()}${path}`, init)
   } catch {
     reply = null
   }
   const up = reply !== null && reply.ok
   if ((await read($, linked)) !== up) await update($, linked, () => up)
-  if (!reply || !reply.ok) throw new Error(`sourcerer-link does not answer on ${LINK}: start it with \`sourcerer-link serve\``)
+  if (!reply || !reply.ok) throw new Error(`the chatmap host does not answer on ${await read($, host)}`)
   return JSON.parse(reply.text)
 }
 
@@ -289,7 +301,7 @@ async function edit($: EngineInterface, id: string, title: string, description: 
   })
 }
 
-type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number; tick?: Timer }
+type Lane = { queue: Promise<void>; url: string; backlog: boolean; failedAt: number; hostTriedAt: number; fullDue: boolean; tick?: Timer }
 
 async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   const placed = await place($)
@@ -317,35 +329,90 @@ async function step($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
 
 function work($: EngineInterface, mode: Mode, lane: Lane): Promise<void> {
   lane.queue = lane.queue.then(async () => {
+    if (!(await read($, linked)) && (await $.clock.now()) - lane.hostTriedAt > HOST_RETRY_MS) {
+      try {
+        await findHost($, lane)
+        await publish($)
+      } catch {
+        // tried again after HOST_RETRY_MS; the footer reads `host off` meanwhile
+      }
+    }
     const asked = await actions($)
     const backlog = lane.backlog
+    const fullDue = lane.fullDue
     lane.backlog = false
-    return step($, asked === 'full' || mode === 'full' ? 'full' : asked === 'step' || mode === 'step' || backlog ? 'step' : 'none', lane)
+    lane.fullDue = false
+    return step($, asked === 'full' || mode === 'full' || fullDue ? 'full' : asked === 'step' || mode === 'step' || backlog ? 'step' : 'none', lane)
   })
   return lane.queue
 }
 
 type Imported = { n: number; prompt: string; answer: string; tools: string[] }
 
-async function importHistory($: EngineInterface): Promise<number> {
-  if ((await read($, physical)).length) return 0
+async function pastTurns($: EngineInterface): Promise<Imported[] | null> {
   const run = await $.process.run(
     ['python3', `${$.plugin.root}/tools/classify_offline.py`, '--dump-turns', await $.session.id()],
     { timeoutMs: 120000 },
   )
   if (run.exitCode !== 0) {
-    $.ui.toast(`chatmap could not import past turns: ${run.stderr.trim().split('\n').pop()}`)
-    return 0
+    $.ui.toast(`chatmap could not read past turns: ${run.stderr.trim().split('\n').pop()}`)
+    return null
   }
-  const imported = JSON.parse(run.stdout) as Imported[]
-  const turns: Physical[] = imported.map(t => ({
-    ...t,
-    short: t.n > 1 && t.tools.length === 0 && t.prompt.length < SHORT_CHARS,
-    haiku: [],
-    state: 'unclassified',
-  }))
-  if (turns.length) await update($, physical, () => turns)
-  return turns.length
+  return JSON.parse(run.stdout) as Imported[]
+}
+
+function imported(t: Imported): Physical {
+  return { ...t, short: t.n > 1 && t.tools.length === 0 && t.prompt.length < SHORT_CHARS, haiku: [], state: 'unclassified' }
+}
+
+async function reconcile($: EngineInterface, lane: Lane): Promise<void> {
+  const past = await pastTurns($)
+  if (!past) return
+  const turns = await read($, physical)
+  if (!turns.length) {
+    if (past.length) {
+      await update($, physical, () => past.map(imported))
+      lane.backlog = true
+    }
+    return
+  }
+  // Align recorded turns with the transcript in order (longest common subsequence of the prompts' starts).
+  // A recorded turn the transcript lacks (a message queued and then removed) is dropped; text typed during a turn is ignored.
+  const key = (text: string) => text.split(`\n\n${DURING} `)[0].slice(0, MATCH_CHARS)
+  const a = turns.map(p => key(p.prompt))
+  const b = past.map(t => key(t.prompt))
+  const longest = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1))
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      longest[i][j] = a[i] === b[j] ? longest[i + 1][j + 1] + 1 : Math.max(longest[i + 1][j], longest[i][j + 1])
+    }
+  }
+  const matched = new Map<number, number>()
+  for (let i = 0, j = 0; i < a.length && j < b.length; ) {
+    if (a[i] === b[j]) {
+      matched.set(turns[i].n, j)
+      i++
+      j++
+    } else if (longest[i + 1][j] >= longest[i][j + 1]) i++
+    else j++
+  }
+  if (matched.size * 2 < turns.length) {
+    $.ui.toast('chatmap could not match its map with the transcript: Rebuild to start the map over')
+    return
+  }
+  const byIndex = new Map(turns.filter(p => matched.has(p.n)).map(p => [matched.get(p.n)!, p]))
+  if (byIndex.size === past.length && turns.length === past.length && [...matched].every(([n, i]) => n === i + 1)) return
+  await update($, physical, () => past.map((t, i) => (byIndex.has(i) ? { ...byIndex.get(i)!, n: i + 1 } : imported({ ...t, n: i + 1 }))))
+  await update($, logical, list =>
+    list
+      .map(l => ({ ...l, physical: l.physical.filter(n => matched.has(n)).map(n => matched.get(n)! + 1) }))
+      .filter(l => l.physical.length > 0),
+  )
+  const done = await read($, logical)
+  const covered = done.length ? Math.max(...done[done.length - 1].physical) : 0
+  const added = past.map((_, i) => i + 1).filter(n => !byIndex.has(n - 1))
+  if (added.some(n => n <= covered)) lane.fullDue = true
+  else if (added.length) lane.backlog = true
 }
 
 async function dropNotifications($: EngineInterface): Promise<void> {
@@ -357,22 +424,68 @@ async function dropNotifications($: EngineInterface): Promise<void> {
   )
 }
 
-async function savedOn($: EngineInterface): Promise<boolean> {
+async function answers($: EngineInterface, base: string): Promise<boolean> {
   try {
-    return ((await link($, '/state')) as Saved | null)?.enabled === true
+    return (await $.http.fetch(`${base}/sessions`)).ok
   } catch {
     return false
   }
 }
 
-async function turnOn($: EngineInterface, lane: Lane): Promise<void> {
+function startOwn($: EngineInterface): Promise<void> {
+  return new Promise((resolve, reject) => {
+    void (async () => {
+      const server = $.process.spawn({ argv: ['python3', `${$.plugin.root}/server/chatmap_server.py`, 'serve'] })
+      let ready = false
+      for await (const { stream, text } of server) {
+        if (!ready && text.includes('chatmap on http://')) {
+          ready = true
+          resolve()
+        } else if (stream === 'stderr') {
+          $.ui.log(text, { to: 'debug' })
+        }
+      }
+      if (!ready) reject(new Error('the chatmap host stopped before it was ready'))
+    })()
+  })
+}
+
+async function findHost($: EngineInterface, lane: Lane): Promise<void> {
+  lane.hostTriedAt = await $.clock.now()
+  let base = (await answers($, LINK)) ? LINK : (await answers($, OWN)) ? OWN : ''
+  if (!base) {
+    try {
+      await startOwn($)
+    } catch (error) {
+      // another chat may have bound the port a moment earlier
+      if (!(await answers($, OWN))) throw error
+    }
+    base = OWN
+  }
+  await update($, host, () => base)
   const cwd = await $.session.cwd()
   await link($, '', { cwd, title: cwd.split('/').pop() ?? cwd, page: `${$.plugin.root}/tools/grid.html` })
+  lane.url = `${base}/s/${await $.session.id()}/`
+}
+
+async function savedOn($: EngineInterface): Promise<boolean> {
+  for (const base of [LINK, OWN]) {
+    if (await answers($, base)) {
+      await update($, host, () => base)
+      return ((await link($, '/state')) as Saved | null)?.enabled === true
+    }
+  }
+  const run = await $.process.run(['python3', `${$.plugin.root}/server/chatmap_server.py`, 'enabled', await $.session.id()], { timeoutMs: 10000 })
+  return run.stdout.trim() === 'true'
+}
+
+async function turnOn($: EngineInterface, lane: Lane): Promise<void> {
+  await findHost($, lane)
   const saved = (await link($, '/state')) as Saved | null
   await update($, enabled, () => true)
-  if (!(await restore($, saved))) lane.backlog = (await importHistory($)) > 0
+  await restore($, saved)
+  await reconcile($, lane)
   await dropNotifications($)
-  lane.url = `${LINK}/s/${await $.session.id()}/`
   lane.tick ??= $.clock.every(TICK_MS, () => {
     void work($, 'none', lane)
   })
@@ -414,17 +527,15 @@ async function toggle($: EngineInterface, lane: Lane): Promise<void> {
 
 export const register: Register = on => {
   let tools: string[] = []
-  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0 }
+  const lane: Lane = { queue: Promise.resolve(), url: '', backlog: false, failedAt: 0, hostTriedAt: 0, fullDue: false }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({ name: 'chatmap', description: 'Reorganise this conversation (full: rebuild from scratch) and show the URL of its map', argumentHint: '[full]' })
-    if ((await read($, enabled)) || (await savedOn($))) {
-      try {
-        await turnOn($, lane)
-      } catch (error) {
-        $.ui.toast(`chatmap: ${(error as Error).message}`)
-      }
+    try {
+      if ((await read($, enabled)) || (await savedOn($))) await turnOn($, lane)
+    } catch (error) {
+      $.ui.toast(`chatmap: ${(error as Error).message}`)
     }
     return result
   })
@@ -436,7 +547,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="row" gap={1}>
         {e.props.modes.length ? <Text dimColor>{e.props.modes.join(' & ')}</Text> : null}
-        <Button key="chatmap" label={!active ? 'chatmap off' : up ? 'chatmap on' : 'chatmap on · link off'} plain onPress={() => void toggle($, lane)} />
+        <Button key="chatmap" label={!active ? 'chatmap off' : up ? 'chatmap on' : 'chatmap on · host off'} plain onPress={() => void toggle($, lane)} />
       </Box>
     )
   })
@@ -446,7 +557,7 @@ export const register: Register = on => {
     const turns = await read($, physical)
     const running = turns.find(p => p.state === 'running')
     if (e.turnId !== undefined && running) {
-      const added = `${running.prompt}\n\n[during the turn] ${e.text}`.slice(0, PROMPT_TEXT)
+      const added = `${running.prompt}\n\n${DURING} ${e.text}`.slice(0, PROMPT_TEXT)
       await update($, physical, list => list.map(p => (p.n === running.n ? { ...p, prompt: added } : p)))
       await publish($)
       return next(e)

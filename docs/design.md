@@ -16,7 +16,8 @@ The primary topic is often recognisable only afterwards.
 - `hooks/register.tsx`: the mod.
 - `types/index.d.ts`: the contract of its `$.state`.
 - `prompts/classifier.md`, `prompts/reorganizer.md`: the two model prompts, read at run time.
-- `tools/grid.html`: the map page, served by sourcerer-link and used by the offline script.
+- `server/chatmap_server.py`, `server/index.html`: chatmap's own host and its index page.
+- `tools/grid.html`: the map page, served by the host and used by the offline script.
 - `tools/classify_offline.py`: replays a past transcript through the same prompts.
 
 ## Turns
@@ -58,21 +59,24 @@ The primary topic is often recognisable only afterwards.
 - `$.model.complete({ model, system, prompt, maxTokens })` runs both models; the reply's JSON is checked and a reply that names unknown topics or misses turns is refused with a toast.
 
 ## Hosts
-- The map lives in a host: one local process for all the chats of the machine. Target design; today (2026-10-05) the code posts to sourcerer-link only.
-- **chatmap's own host**: a server in this repo, Python standard library only, on `127.0.0.1:40998`, data in chatmap's own folder. chatmap needs nothing else installed and knows nothing of Sourcerer.
+- The map lives in a host: one local process for all the chats of the machine.
+- **chatmap's own host**: `server/chatmap_server.py`, Python standard library only, on `127.0.0.1:40998`, data in chatmap's own folder. chatmap needs nothing else installed and knows nothing of Sourcerer.
 - **sourcerer-link** (repo `genro/sourcerer-link`), when installed, hosts chatmap's logic itself on `127.0.0.1:40999`, so the machine runs one process for all its plugins instead of one per plugin.
-- The host logic is one module of this repo, separate from its HTTP front: chatmap's own server wraps it in `http.server`; sourcerer-link loads the same module through an adapter. One code, two fronts.
-- Both hosts speak the same routes (below); one protocol test suite runs against both.
+- The host logic is the classes `Hub` and `Session` of `server/chatmap_server.py`, separate from its `http.server` front; sourcerer-link is to load the same classes through an adapter (today it still runs its own copy, the L1 server they come from).
+- Both hosts speak the same routes (below); `tests/test_server.py` is the protocol test suite.
 - Choice, at every turning on: the mod asks `40999`; if sourcerer-link answers, it uses it; otherwise it uses `40998`, and starts chatmap's own host when nothing answers there.
 - Lifecycle of chatmap's own host: started by the mod (`$.process.spawn`), it ends with the chat that started it; any chat that is on and finds no host at its next tick starts it again. The maps are on disk, so a restart loses nothing; open pages reconnect.
-- Optional `install` for chatmap's own host (macOS LaunchAgent) for whoever wants it always on.
+- `chatmap_server.py enabled <session>` tells from the saved map whether a chat was on, without starting the host: the mod asks it at load when no host answers.
+- A chat that is on and loses its host tries again every 10 s (`findHost`); the footer reads `chatmap on · host off` meanwhile.
+- Optional `chatmap_server.py install` (macOS LaunchAgent) for whoever wants the host always on.
+- Data folder: `~/Library/Application Support/chatmap` (macOS), `%LOCALAPPDATA%\\chatmap` (Windows), `$XDG_DATA_HOME/chatmap` (Linux).
 
 ## Server and page
 - Turning on registers the chat (`POST /sessions/<id>`: working directory, title, path of `tools/grid.html`).
 - The mod posts the whole map (`POST /sessions/<id>/state`) after every change; the host saves it and sends it to the open pages as a server-sent event.
 - The page queues actions (`POST /s/<id>/action`): reorganise, rebuild, edit a topic. The mod takes them every second (`GET /sessions/<id>/inbox`).
 - `/` lists the chats; `/s/<id>/` is one chat's map.
-- When the host does not answer, the footer reads `chatmap on · link off`; the next publish sends the whole map again.
+- When the host does not answer, the footer reads `chatmap on · host off`; the next publish sends the whole map again.
 - `/chatmap` reorganises and returns the URL.
 - The page follows the app's light or dark theme.
 

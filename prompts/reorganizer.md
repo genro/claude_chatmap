@@ -19,7 +19,7 @@ Topics:
 - A topic with `fixed: true` was named by the user: keep its id, title and description, keep it in `topics`, never merge it away. Place turns under it when they deal with its subject.
 
 Write:
-- `logical`: the logical turns that cover, in order and without gaps, every physical turn of `revisable` and `new`. Each has:
+- `logical`: the logical turns that cover, in order and without gaps, every physical turn of `revisable` and `new`; each physical turn belongs to exactly one logical turn. Each has:
   - `physical`: the numbers of its physical turns, consecutive.
   - `label`: what the turn did, in 3 to 10 words, in the language of the conversation; a reader scanning a list should recognise the turn from it. Example: "Controllo PR 1351 e rebase su develop".
   - `prompt`: the request as the user would have written it in one go, with the answers they gave to the clarifying questions folded in. Written in the language of the conversation.

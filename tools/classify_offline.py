@@ -66,6 +66,9 @@ class Transcript:
         """The text the user typed, or None when the record is not a prompt."""
         if record.get("type") != "user" or record.get("isMeta") or record.get("isCompactSummary") or "toolUseResult" in record:
             return None
+        origin = (record.get("origin") or {}).get("kind")
+        if origin not in (None, "human"):
+            return None
         content = record["message"]["content"]
         if isinstance(content, str):
             text = content
@@ -74,7 +77,8 @@ class Transcript:
                 return None
             text = "\n".join(b["text"] for b in content if b.get("type") == "text")
         text = text.strip()
-        if not text or text.startswith("<"):
+        # Slash commands are stored as <command-...> tags; with no origin (older transcripts) every tag is system text.
+        if not text or text.startswith(("<command-", "<local-command")) or (origin is None and text.startswith("<")):
             return None
         return text
 
